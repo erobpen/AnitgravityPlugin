@@ -18,6 +18,16 @@
             font-family: 'Courier New', monospace;
             image-rendering: pixelated;
             image-rendering: crisp-edges;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        #mainContainer {
+            display: flex;
+            flex: 1;
+            margin-top: 36px;
+            overflow: hidden;
         }
 
         #statusBar {
@@ -66,7 +76,115 @@
 
         #canvas {
             display: block;
-            margin-top: 36px;
+            flex: 1;
+            min-width: 0;
+        }
+
+        #chatLog {
+            width: 380px;
+            min-width: 300px;
+            background: #16162a;
+            border-left: 2px solid #4a4a6e;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        #chatLogHeader {
+            padding: 8px 12px;
+            background: linear-gradient(180deg, #2d2d4e 0%, #1a1a2e 100%);
+            border-bottom: 1px solid #3a3a5e;
+            font-size: 11px;
+            color: #8888cc;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        #chatLogMessages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            scroll-behavior: smooth;
+        }
+
+        #chatLogMessages::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #chatLogMessages::-webkit-scrollbar-track {
+            background: #16162a;
+        }
+
+        #chatLogMessages::-webkit-scrollbar-thumb {
+            background: #3a3a5e;
+            border-radius: 3px;
+        }
+
+        .chat-msg {
+            margin-bottom: 10px;
+            padding: 8px 10px;
+            border-radius: 6px;
+            background: #1e1e36;
+            border-left: 3px solid #4466aa;
+            font-size: 11px;
+            line-height: 1.5;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+
+        .chat-msg.user {
+            border-left-color: #44cc88;
+        }
+
+        .chat-msg.agent {
+            border-left-color: #6688ee;
+        }
+
+        .chat-msg.tool {
+            border-left-color: #ee8844;
+        }
+
+        .chat-msg.system {
+            border-left-color: #aa44cc;
+        }
+
+        .chat-msg-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .chat-msg-role {
+            font-weight: bold;
+            font-size: 10px;
+        }
+
+        .chat-msg.user .chat-msg-role {
+            color: #44cc88;
+        }
+
+        .chat-msg.agent .chat-msg-role {
+            color: #6688ee;
+        }
+
+        .chat-msg.tool .chat-msg-role {
+            color: #ee8844;
+        }
+
+        .chat-msg.system .chat-msg-role {
+            color: #aa44cc;
+        }
+
+        .chat-msg-time {
+            color: #555577;
+            font-size: 9px;
+        }
+
+        .chat-msg-text {
+            color: #bbbbd8;
+            font-family: 'Courier New', monospace;
         }
 
         #noConnection {
@@ -117,7 +235,14 @@
         <div class="hint">Server: ws://localhost:3777</div>
     </div>
 
-    <canvas id="canvas"></canvas>
+    <div id="mainContainer">
+        <canvas id="canvas"></canvas>
+        <div id="chatLog">
+            <div id="chatLogHeader">💬 Chat Log <span id="chatMsgCount" style="margin-left:auto;color:#555577">0
+                    messages</span></div>
+            <div id="chatLogMessages"></div>
+        </div>
+    </div>
 
     <script>
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -181,10 +306,13 @@
         const ctx = canvas.getContext('2d');
 
         function resize() {
-            canvas.width = window.innerWidth;
-            canvas.height = window.innerHeight - 36;
+            const container = document.getElementById('mainContainer');
+            const chatLog = document.getElementById('chatLog');
+            canvas.width = container.clientWidth - chatLog.offsetWidth;
+            canvas.height = container.clientHeight;
         }
         window.addEventListener('resize', resize);
+        setTimeout(resize, 50);
         resize();
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -794,7 +922,6 @@
                 case 'prompt_start':
                     currentPrompt = event.prompt;
                     sessionStart = event.timestamp;
-                    // Clear agents for new prompt
                     agents.forEach(a => a.remove());
                     break;
 
@@ -817,9 +944,38 @@
                         agents.get(event.agentId).remove();
                     }
                     break;
+
+                case 'chat_message':
+                    addChatMessage(event.role, event.agent, event.text, event.timestamp);
+                    break;
             }
 
             updateStatusBar();
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // CHAT LOG
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        let chatMsgTotal = 0;
+
+        function addChatMessage(role, agentName, text, timestamp) {
+            const container = document.getElementById('chatLogMessages');
+            const countEl = document.getElementById('chatMsgCount');
+
+            const div = document.createElement('div');
+            div.className = 'chat-msg ' + (role || 'agent');
+
+            const time = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+            const icon = role === 'user' ? '👤' : role === 'tool' ? '🔧' : role === 'system' ? '⚙️' : '🤖';
+
+            div.innerHTML = `<div class="chat-msg-header"><span class="chat-msg-role">${icon} ${agentName || role || 'Agent'}</span><span class="chat-msg-time">${time}</span></div><div class="chat-msg-text"></div>`;
+            div.querySelector('.chat-msg-text').textContent = text || '';
+
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+
+            chatMsgTotal++;
+            countEl.textContent = chatMsgTotal + ' messages';
         }
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
