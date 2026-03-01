@@ -8,7 +8,17 @@ const PIXEL_ART_SERVER = 'http://localhost:3777';
 let currentPanel: vscode.WebviewPanel | undefined;
 let wsConnection: any;
 
-// Helper to post events to the Docker Agent API
+// Debounce timers for activity detection
+let editDebounce: NodeJS.Timeout | undefined;
+let terminalDebounce: NodeJS.Timeout | undefined;
+let diagnosticDebounce: NodeJS.Timeout | undefined;
+
+// Track active agents so we can clean up
+const activeAgents = new Set<string>();
+
+// ──────────────────────────────────────────────
+// HTTP helper to post events to Docker API
+// ──────────────────────────────────────────────
 async function postAgentEvent(endpoint: string, data: any): Promise<void> {
     return new Promise((resolve) => {
         try {
@@ -30,21 +40,165 @@ async function postAgentEvent(endpoint: string, data: any): Promise<void> {
                     res.on('end', () => resolve());
                 }
             );
-            req.on('error', (e) => {
-                console.error('[AgentViz API Error]', e);
-                resolve(); // Continue even if visualizer is offline
-            });
+            req.on('error', () => resolve());
             req.write(payload);
             req.end();
-        } catch (e) {
-            console.error(e);
+        } catch {
             resolve();
         }
     });
 }
 
+async function spawnAgent(id: string, name: string, role: string, action: string, message: string, target?: string) {
+    activeAgents.add(id);
+    await postAgentEvent('/api/agent', { id, name, role, action, message, target });
+}
+
+async function removeAgent(id: string) {
+    if (activeAgents.has(id)) {
+        activeAgents.delete(id);
+        await postAgentEvent('/api/agent', { id, remove: true });
+    }
+}
+
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// ──────────────────────────────────────────────
+// REAL-TIME WORKSPACE ACTIVITY MONITOR
+// ──────────────────────────────────────────────
+function startRealtimeMonitor(context: vscode.ExtensionContext) {
+
+    // 1. FILE EDITS → "Developer" agent codes
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeTextDocument((e) => {
+            if (e.contentChanges.length === 0) return;
+            const fileName = path.basename(e.document.fileName);
+            // Ignore output channels, git internals, settings
+            if (fileName.startsWith('extension-output') || e.document.uri.scheme !== 'file') return;
+
+            if (editDebounce) clearTimeout(editDebounce);
+            editDebounce = setTimeout(async () => {
+                const lang = e.document.languageId;
+                const roleMap: Record<string, string> = {
+                    'typescript': 'Developer', 'javascript': 'Developer',
+                    'python': 'Developer', 'json': 'Analyst',
+                    'html': 'Designer', 'css': 'Designer',
+                    'markdown': 'PM', 'yaml': 'DevOps',
+                    'dockerfile': 'DevOps'
+                };
+                const role = roleMap[lang] || 'Developer';
+                await spawnAgent('dev-edit', getNameForRole(role), role, 'coding',
+                    `Editing ${fileName}`);
+
+                // Auto-remove after 8 seconds of inactivity
+                setTimeout(() => removeAgent('dev-edit'), 8000);
+            }, 500); // debounce 500ms
+        })
+    );
+
+    // 2. FILE SAVES → brief "reviewing" action
+    context.subscriptions.push(
+        vscode.workspace.onDidSaveTextDocument(async (doc) => {
+            const fileName = path.basename(doc.fileName);
+            if (doc.uri.scheme !== 'file') return;
+            await spawnAgent('dev-save', 'Carol', 'Tester', 'reviewing',
+                `Saved ${fileName} — checking for issues...`);
+            setTimeout(() => removeAgent('dev-save'), 5000);
+        })
+    );
+
+    // 3. TERMINAL ACTIVITY → "DevOps" agent runs commands
+    context.subscriptions.push(
+        vscode.window.onDidOpenTerminal(async (terminal) => {
+            await spawnAgent('ops-terminal', 'Dave', 'DevOps', 'coding',
+                `Terminal opened: ${terminal.name}`);
+            setTimeout(() => removeAgent('ops-terminal'), 6000);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTerminal(async (terminal) => {
+            if (!terminal) return;
+            if (terminalDebounce) clearTimeout(terminalDebounce);
+            terminalDebounce = setTimeout(async () => {
+                await spawnAgent('ops-terminal', 'Dave', 'DevOps', 'coding',
+                    `Running commands in ${terminal.name}...`);
+                setTimeout(() => removeAgent('ops-terminal'), 6000);
+            }, 300);
+        })
+    );
+
+    // 4. DIAGNOSTICS (errors/warnings) → "Tester" reviews
+    context.subscriptions.push(
+        vscode.languages.onDidChangeDiagnostics(async (e) => {
+            if (diagnosticDebounce) clearTimeout(diagnosticDebounce);
+            diagnosticDebounce = setTimeout(async () => {
+                let totalErrors = 0;
+                let totalWarnings = 0;
+                for (const uri of e.uris) {
+                    const diags = vscode.languages.getDiagnostics(uri);
+                    totalErrors += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
+                    totalWarnings += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Warning).length;
+                }
+                if (totalErrors > 0) {
+                    await spawnAgent('tester-diag', 'Carol', 'Tester', 'reviewing',
+                        `Found ${totalErrors} error(s) and ${totalWarnings} warning(s)!`);
+                } else if (totalWarnings > 0) {
+                    await spawnAgent('tester-diag', 'Carol', 'Tester', 'thinking',
+                        `${totalWarnings} warning(s) — reviewing...`);
+                } else {
+                    await spawnAgent('tester-diag', 'Carol', 'Tester', 'talking',
+                        `All clear! No errors. ✅`, 'Bob');
+                }
+                setTimeout(() => removeAgent('tester-diag'), 6000);
+            }, 1000);
+        })
+    );
+
+    // 5. ACTIVE EDITOR CHANGE → "Architect" navigates codebase
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor(async (editor) => {
+            if (!editor || editor.document.uri.scheme !== 'file') return;
+            const fileName = path.basename(editor.document.fileName);
+            await spawnAgent('arch-nav', 'Alice', 'Architect', 'thinking',
+                `Reviewing ${fileName}...`);
+            setTimeout(() => removeAgent('arch-nav'), 5000);
+        })
+    );
+
+    // 6. FILE CREATION/DELETION → "PM" tracks progress
+    context.subscriptions.push(
+        vscode.workspace.onDidCreateFiles(async (e) => {
+            const names = e.files.map(f => path.basename(f.fsPath)).join(', ');
+            await spawnAgent('pm-files', 'Eve', 'PM', 'talking',
+                `New file(s) created: ${names}`, 'Bob');
+            setTimeout(() => removeAgent('pm-files'), 5000);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.workspace.onDidDeleteFiles(async (e) => {
+            const names = e.files.map(f => path.basename(f.fsPath)).join(', ');
+            await spawnAgent('pm-files', 'Eve', 'PM', 'thinking',
+                `File(s) deleted: ${names}`);
+            setTimeout(() => removeAgent('pm-files'), 5000);
+        })
+    );
+
+    console.log('[AgentViz] Real-time workspace monitor started');
+}
+
+function getNameForRole(role: string): string {
+    const names: Record<string, string> = {
+        'Developer': 'Bob', 'Architect': 'Alice', 'Tester': 'Carol',
+        'PM': 'Eve', 'Designer': 'Frank', 'Analyst': 'Dave', 'DevOps': 'Dave'
+    };
+    return names[role] || 'Bob';
+}
+
+// ──────────────────────────────────────────────
+// EXTENSION ACTIVATION
+// ──────────────────────────────────────────────
 export function activate(context: vscode.ExtensionContext) {
     console.log('Agent Visualizer extension activated');
 
@@ -52,112 +206,69 @@ export function activate(context: vscode.ExtensionContext) {
     const openCmd = vscode.commands.registerCommand('agentViz.openPanel', () => openPanel(context));
     context.subscriptions.push(openCmd);
 
-    // 2. Register Chat Participant
+    // 2. Register Chat Participant (@visualize)
     const chatHandler: vscode.ChatRequestHandler = async (
         request: vscode.ChatRequest,
         contextInfo: vscode.ChatContext,
         stream: vscode.ChatResponseStream,
         token: vscode.CancellationToken
     ) => {
-        // Open panel automatically when someone chats with @visualize
         vscode.commands.executeCommand('agentViz.openPanel');
-
-        // Announce start of prompt to backend API
         await postAgentEvent('/api/prompt', { text: request.prompt });
-
         stream.progress('Planning the task...');
 
         try {
-            // Find a suitable language model provided by Antigravity or VS Code Copilot
             const [model] = await vscode.lm.selectChatModels({ vendor: 'copilot', family: 'gpt-4o' });
-
             if (!model) {
-                stream.markdown('No suitable language model found. Please ensure Antigravity AI or Copilot is enabled.');
+                stream.markdown('No language model found.');
                 return { errorDetails: { message: 'Model not found' } };
             }
 
-            // We will ask the model to break down the task and generate a JSON array of events, 
-            // but to still stream text to the user.
             const prompt = `
-You are a development team orchestrator. Build a plan for the user's task.
-Break the user's task into 4-6 sequential steps.
+You are a development team orchestrator. Break the user's task into 4-6 sequential steps.
 For each step, assign one of these roles: architect, developer, tester, pm.
-Respond in valid JSON format only, without markdown blocks, matching this exact schema:
-[
-  { "role": "architect", "name": "Alice", "action": "thinking", "message": "Planning..." },
-  { "role": "developer", "name": "Bob", "action": "coding", "message": "Writing code..." }
-]
-Actions can be: thinking, talking, coding, reviewing, break.
+Respond in valid JSON only, no markdown blocks:
+[{"role":"architect","name":"Alice","action":"thinking","message":"Planning..."}]
+Actions: thinking, talking, coding, reviewing, break.
 
-User Task: ${request.prompt}
-`;
+User Task: ${request.prompt}`;
+
             const userMessage = vscode.LanguageModelChatMessage.User(prompt);
-
             const response = await model.sendRequest([userMessage], {}, token);
 
             let aiOutput = '';
-            for await (const chunk of response.text) {
-                aiOutput += chunk;
-            }
+            for await (const chunk of response.text) { aiOutput += chunk; }
 
-            // Try to parse JSON from output (strip markdown blocks if any)
-            let planJson = aiOutput.replace(/```json/g, '').replace(/```/g, '').trim();
             let plan: any[] = [];
             try {
-                plan = JSON.parse(planJson);
-            } catch (e) {
-                stream.markdown('Failed to generate a valid plan. Defaulting to a generic workflow...\n');
+                plan = JSON.parse(aiOutput.replace(/```json/g, '').replace(/```/g, '').trim());
+            } catch {
                 plan = [
                     { role: 'architect', name: 'Alice', action: 'thinking', message: `Analyzing: ${request.prompt}` },
-                    { role: 'developer', name: 'Bob', action: 'coding', message: 'Implementing initial code' },
-                    { role: 'tester', name: 'Carol', action: 'reviewing', message: 'Testing the implementation' }
+                    { role: 'developer', name: 'Bob', action: 'coding', message: 'Implementing...' },
+                    { role: 'tester', name: 'Carol', action: 'reviewing', message: 'Testing...' }
                 ];
             }
 
-            stream.markdown('Here is the execution plan:\n\n');
+            stream.markdown('**Execution Plan:**\n\n');
             for (const step of plan) {
                 stream.markdown(`- **${step.name} (${step.role})**: ${step.message}\n`);
             }
 
-            // Simulate the execution inside the Pixel Art Office
-            stream.progress('Agents are now working inside the office...');
-
+            stream.progress('Agents working in the office...');
             let i = 1;
             for (const step of plan) {
-                if (token.isCancellationRequested) {
-                    break;
-                }
-
-                const agentId = `agent-${i}`;
-
-                // Spawn/Update Agent
-                await postAgentEvent('/api/agent', {
-                    id: agentId,
-                    name: step.name,
-                    role: step.role,
-                    action: step.action,
-                    message: step.message,
-                    target: step.target || undefined
-                });
-
-                // Wait a bit so the user can watch the animation
+                if (token.isCancellationRequested) break;
+                await spawnAgent(`chat-${i}`, step.name, step.role, step.action, step.message, step.target);
                 await sleep(3000);
                 i++;
             }
+            for (let j = 1; j < i; j++) { await removeAgent(`chat-${j}`); await sleep(500); }
 
-            // Despawn agents
-            for (let j = 1; j < i; j++) {
-                await postAgentEvent('/api/agent', { id: `agent-${j}`, remove: true });
-                await sleep(500);
-            }
-
-            stream.markdown('\n\n✅ Task simulation completed in the office!');
-
+            stream.markdown('\n\n✅ Task complete!');
             return {};
-
         } catch (err: any) {
-            console.error(err);
-            stream.markdown(`An error occurred: ${err.message}`);
+            stream.markdown(`Error: ${err.message}`);
             return { errorDetails: { message: err.message } };
         }
     };
@@ -165,83 +276,58 @@ User Task: ${request.prompt}
     const participant = vscode.chat.createChatParticipant('agentViz.participant', chatHandler);
     participant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png');
     context.subscriptions.push(participant);
+
+    // 3. START REAL-TIME MONITOR — watches file edits, terminal, diagnostics, etc.
+    startRealtimeMonitor(context);
+
+    // Send initial prompt to visualizer
+    postAgentEvent('/api/prompt', { text: 'Antigravity IDE — live workspace activity' });
 }
 
+// ──────────────────────────────────────────────
+// WEBVIEW PANEL
+// ──────────────────────────────────────────────
 function openPanel(context: vscode.ExtensionContext) {
-    if (currentPanel) {
-        currentPanel.reveal(vscode.ViewColumn.One);
-        return;
-    }
+    if (currentPanel) { currentPanel.reveal(vscode.ViewColumn.One); return; }
 
     currentPanel = vscode.window.createWebviewPanel(
-        'agentVisualizer',
-        '🏢 Agent Office',
-        vscode.ViewColumn.One,
+        'agentVisualizer', '🏢 Agent Office', vscode.ViewColumn.One,
         {
-            enableScripts: true,
-            retainContextWhenHidden: true,
-            localResourceRoots: [
-                vscode.Uri.file(path.join(context.extensionPath, 'media'))
-            ]
+            enableScripts: true, retainContextWhenHidden: true,
+            localResourceRoots: [vscode.Uri.file(path.join(context.extensionPath, 'media'))]
         }
     );
 
     const htmlPath = path.join(context.extensionPath, 'media', 'office.html');
     let html = fs.readFileSync(htmlPath, 'utf8');
-
     const mediaUri = currentPanel.webview.asWebviewUri(
         vscode.Uri.file(path.join(context.extensionPath, 'media'))
     );
     html = html.replace(/{{mediaUri}}/g, mediaUri.toString());
-
     currentPanel.webview.html = html;
 
     connectToServer(currentPanel);
 
-    currentPanel.onDidDispose(
-        () => {
-            currentPanel = undefined;
-            if (wsConnection) {
-                wsConnection.close();
-                wsConnection = undefined;
-            }
-        },
-        null,
-        context.subscriptions
-    );
+    currentPanel.onDidDispose(() => {
+        currentPanel = undefined;
+        if (wsConnection) { wsConnection.close(); wsConnection = undefined; }
+    }, null, context.subscriptions);
 }
 
 function connectToServer(panel: vscode.WebviewPanel) {
     try {
         const WebSocket = require('ws');
-        const serverUrl = 'ws://localhost:3777';
+        if (wsConnection) wsConnection.close();
+        wsConnection = new WebSocket('ws://localhost:3777');
 
-        if (wsConnection) {
-            wsConnection.close();
-        }
-
-        wsConnection = new WebSocket(serverUrl);
-
-        wsConnection.on('open', () => {
-            panel.webview.postMessage({ type: 'connection', status: 'connected' });
-        });
-
+        wsConnection.on('open', () => panel.webview.postMessage({ type: 'connection', status: 'connected' }));
         wsConnection.on('message', (data: any) => {
-            try {
-                const parsed = JSON.parse(data.toString());
-                panel.webview.postMessage(parsed);
-            } catch (e) {
-                console.error('[AgentViz] Parse error:', e);
-            }
+            try { panel.webview.postMessage(JSON.parse(data.toString())); } catch { }
         });
-
         wsConnection.on('close', () => {
             panel.webview.postMessage({ type: 'connection', status: 'disconnected' });
-            setTimeout(() => {
-                if (currentPanel) connectToServer(panel);
-            }, 3000);
+            setTimeout(() => { if (currentPanel) connectToServer(panel); }, 3000);
         });
-
         wsConnection.on('error', (err: any) => {
             panel.webview.postMessage({ type: 'connection', status: 'error', error: err.message });
         });
@@ -251,7 +337,9 @@ function connectToServer(panel: vscode.WebviewPanel) {
 }
 
 export function deactivate() {
-    if (wsConnection) {
-        wsConnection.close();
+    // Clean up all active agents
+    for (const id of activeAgents) {
+        postAgentEvent('/api/agent', { id, remove: true });
     }
+    if (wsConnection) wsConnection.close();
 }
