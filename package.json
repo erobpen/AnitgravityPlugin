@@ -5,7 +5,7 @@
     "version": "0.1.0",
     "publisher": "erobpen",
     "engines": {
-        "vscode": "^1.85.0"
+        "vscode": "^1.90.0"
     },
     "categories": [
         "Visualization"
@@ -26,6 +26,14 @@
                 "key": "ctrl+shift+a",
                 "mac": "cmd+shift+a"
             }
+        ],
+        "chatParticipants": [
+            {
+                "id": "agentViz.participant",
+                "name": "visualize",
+                "description": "Visualize agents working on your task",
+                "isSticky": true
+            }
         ]
     },
     "scripts": {
@@ -35,7 +43,7 @@
         "lint": "eslint src --ext ts"
     },
     "devDependencies": {
-        "@types/vscode": "^1.85.0",
+        "@types/vscode": "^1.90.0",
         "@types/node": "^20.0.0",
         "typescript": "^5.3.0"
     },

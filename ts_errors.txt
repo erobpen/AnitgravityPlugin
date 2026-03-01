@@ -1,0 +1,1 @@
+src/extension.ts(81,67): error TS2339: Property 'System' does not exist on type 'typeof LanguageModelChatMessage'.
