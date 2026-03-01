@@ -271,20 +271,32 @@ function startFileWatcher() {
 
     watcher.on('change', (filePath) => {
         const base = path.basename(filePath);
+        // Skip the chat bridge file — handled separately
+        if (base === '_chat_bridge.jsonl') return;
         const agent = getAgentForFile(filePath);
         debounced(`change-${agent.id}`, 400, () => {
-            // Read the actual file content for the bubble
             const excerpt = readFileExcerpt(filePath);
             const bubbleText = excerpt
                 ? `📝 ${base}: ${excerpt}`
                 : `Editing ${base}`;
             console.log(`[Watcher] Changed: ${base}`);
             showAgent(agent.id, agent.name, agent.role, agent.action, bubbleText);
+            // Also push to chat log
+            const chatMsg = {
+                type: 'chat_message',
+                role: 'tool',
+                agent: agent.name + ' (' + agent.role + ')',
+                text: bubbleText,
+                timestamp: Date.now()
+            };
+            chatHistory.push(chatMsg);
+            broadcastEvent(chatMsg);
         });
     });
 
     watcher.on('add', (filePath) => {
         const base = path.basename(filePath);
+        if (base === '_chat_bridge.jsonl') return;
         const agent = getAgentForFile(filePath);
         debounced(`add-${agent.id}`, 400, () => {
             const excerpt = readFileExcerpt(filePath);
@@ -293,19 +305,122 @@ function startFileWatcher() {
                 : `New file: ${base}`;
             console.log(`[Watcher] Created: ${base}`);
             showAgent('fs-create', 'Eve', 'PM', 'talking', bubbleText, agent.name);
+            const chatMsg = {
+                type: 'chat_message',
+                role: 'tool',
+                agent: 'Eve (PM)',
+                text: bubbleText,
+                timestamp: Date.now()
+            };
+            chatHistory.push(chatMsg);
+            broadcastEvent(chatMsg);
         });
     });
 
     watcher.on('unlink', (filePath) => {
         const base = path.basename(filePath);
+        if (base === '_chat_bridge.jsonl') return;
         debounced(`del-${base}`, 400, () => {
             console.log(`[Watcher] Deleted: ${base}`);
             showAgent('fs-delete', 'Eve', 'PM', 'thinking', `🗑️ Deleted: ${base}`);
+            const chatMsg = {
+                type: 'chat_message',
+                role: 'tool',
+                agent: 'Eve (PM)',
+                text: `🗑️ Deleted: ${base}`,
+                timestamp: Date.now()
+            };
+            chatHistory.push(chatMsg);
+            broadcastEvent(chatMsg);
         });
     });
 
     watcher.on('error', (err) => console.error('[Watcher] Error:', err.message));
     console.log('[Watcher] File system watcher started — content will appear in office bubbles');
+
+    // ── CHAT BRIDGE FILE WATCHER ──────────────────────────────────────
+    // Watches _chat_bridge.jsonl for new lines appended by the agent.
+    // Each line is a JSON object: {"role":"user|agent","agent":"Name","text":"..."}
+    // Reads only NEW lines by tracking byte offset.
+    const BRIDGE_FILE = path.join(WORKSPACE_DIR, '_chat_bridge.jsonl');
+    let bridgeOffset = 0;
+
+    // Initialize offset to current file size (skip existing content on startup)
+    try {
+        if (fs.existsSync(BRIDGE_FILE)) {
+            bridgeOffset = fs.statSync(BRIDGE_FILE).size;
+            console.log(`[Bridge] Found existing bridge file, offset=${bridgeOffset}`);
+        }
+    } catch { }
+
+    function processBridgeFile() {
+        try {
+            const stat = fs.statSync(BRIDGE_FILE);
+            if (stat.size <= bridgeOffset) return;
+
+            // Read only the new bytes
+            const fd = fs.openSync(BRIDGE_FILE, 'r');
+            const buf = Buffer.alloc(stat.size - bridgeOffset);
+            fs.readSync(fd, buf, 0, buf.length, bridgeOffset);
+            fs.closeSync(fd);
+            bridgeOffset = stat.size;
+
+            const newContent = buf.toString('utf8');
+            const lines = newContent.split('\n').filter(l => l.trim().length > 0);
+
+            for (const line of lines) {
+                try {
+                    const msg = JSON.parse(line);
+                    const chatRole = msg.role || 'agent';
+                    const agentName = msg.agent || (chatRole === 'user' ? 'You' : 'Antigravity');
+                    const text = msg.text || '';
+
+                    // Show agent in office
+                    const isUser = chatRole === 'user';
+                    showAgent(
+                        isUser ? 'chat-user' : 'chat-agent',
+                        agentName,
+                        isUser ? 'PM' : 'Architect',
+                        isUser ? 'talking' : 'thinking',
+                        text.substring(0, 100),
+                        isUser ? 'Antigravity' : undefined
+                    );
+
+                    // Push to chat log
+                    const chatMsg = {
+                        type: 'chat_message',
+                        role: chatRole,
+                        agent: agentName,
+                        text: text,
+                        timestamp: Date.now()
+                    };
+                    chatHistory.push(chatMsg);
+                    broadcastEvent(chatMsg);
+
+                    console.log(`[Bridge] ${agentName}: ${text.substring(0, 60)}...`);
+                } catch (parseErr) {
+                    console.log(`[Bridge] Skipping malformed line: ${line.substring(0, 50)}`);
+                }
+            }
+        } catch (err) {
+            // File doesn't exist yet, that's fine
+        }
+    }
+
+    // Watch the bridge file specifically
+    const bridgeWatcher = chokidar.watch(BRIDGE_FILE, {
+        persistent: true,
+        ignoreInitial: true,
+        usePolling: true,
+        interval: 300,
+        awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 100 }
+    });
+
+    bridgeWatcher.on('add', () => processBridgeFile());
+    bridgeWatcher.on('change', () => processBridgeFile());
+    bridgeWatcher.on('error', () => { }); // silently ignore if file doesn't exist yet
+
+    console.log(`[Bridge] Watching for chat bridge file: ${BRIDGE_FILE}`);
 }
 
 // ── Start ──────────────────────────────────────────────────────────────
@@ -314,3 +429,4 @@ server.listen(PORT, '0.0.0.0', () => {
     console.log(`🏢 Agent Visualizer server running on port ${PORT}`);
     startFileWatcher();
 });
+

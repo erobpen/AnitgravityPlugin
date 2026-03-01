@@ -1,0 +1,4 @@
+{"role":"user","agent":"You (User)","text":"How can we make this so that you do not have to ask me authorization to push message to the http://localhost:3777, and still this chat is filtered, I wanted verbose. All from this chat should be in the Live workspace as bubbles."}
+{"role":"agent","agent":"Antigravity","text":"Setting up fully automatic bridge! Created _chat_bridge.jsonl approach: I just append a JSON line to this file, and the Docker watcher picks it up automatically. No API calls, no authorization needed. Every message from this chat now flows straight to the office."}
+{"role":"user","agent":"You (User)","text":"Let us test it out. Tell me a joke."}
+{"role":"agent","agent":"Antigravity","text":"Why did the developer quit his job?\n\nBecause he didn't get arrays! 📊😄"}
