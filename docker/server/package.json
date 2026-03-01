@@ -9,6 +9,7 @@
     "dependencies": {
         "express": "^5.1.0",
         "ws": "^8.18.0",
-        "cors": "^2.8.5"
+        "cors": "^2.8.5",
+        "chokidar": "^3.6.0"
     }
 }

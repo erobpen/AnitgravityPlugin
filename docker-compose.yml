@@ -7,4 +7,9 @@ services:
       - "3777:3777"
     environment:
       - PORT=3777
+      - WATCH_WORKSPACE=/workspace
+      - WATCH_BRAIN=/brain
+    volumes:
+      - ./:/workspace:ro
+      - ${USERPROFILE:-.}/.gemini/antigravity/brain:/brain:ro
     restart: unless-stopped
