@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent Office</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a2e;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        #statusBar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 36px;
+            background: linear-gradient(180deg, #2d2d4e 0%, #1a1a2e 100%);
+            border-bottom: 2px solid #4a4a6e;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            z-index: 100;
+            gap: 20px;
+            font-size: 12px;
+            color: #8888cc;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ff4444;
+            transition: background 0.3s;
+        }
+
+        .status-dot.connected {
+            background: #44ff88;
+        }
+
+        .status-prompt {
+            flex: 1;
+            color: #aaaaee;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-style: italic;
+        }
+
+        #canvas {
+            display: block;
+            margin-top: 36px;
+        }
+
+        #noConnection {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #6666aa;
+            font-size: 14px;
+            text-align: center;
+            line-height: 2;
+            z-index: 50;
+        }
+
+        #noConnection .big {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        #noConnection .hint {
+            color: #4444777;
+            font-size: 11px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="statusBar">
+        <div class="status-item">
+            <div class="status-dot" id="connDot"></div>
+            <span id="connText">Disconnected</span>
+        </div>
+        <div class="status-prompt" id="promptText">Waiting for prompt...</div>
+        <div class="status-item">
+            <span>👤</span>
+            <span id="agentCount">0</span>
+        </div>
+        <div class="status-item">
+            <span>⏱</span>
+            <span id="sessionTimer">00:00</span>
+        </div>
+    </div>
+
+    <div id="noConnection">
+        <div class="big">🏢</div>
+        <div>Waiting for Docker server...</div>
+        <div class="hint">Run: docker-compose up --build</div>
+        <div class="hint">Server: ws://localhost:3777</div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script>
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // VS Code API bridge
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const vscode = (typeof acquireVsCodeApi !== 'undefined') ? acquireVsCodeApi() : null;
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // CONFIGURATION
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const PIXEL = 3; // pixel scale
+        const CHAR_W = 12;
+        const CHAR_H = 18;
+        const FLOOR_COLOR = '#2a2a3e';
+        const WALL_COLOR = '#3d3d5c';
+        const GRID_COLOR = '#252538';
+
+        // Character palettes { skin, hair, shirt, pants, shoes }
+        const CHARACTER_PALETTES = [
+            { skin: '#f4c794', hair: '#4a3728', shirt: '#3a7bd5', pants: '#2c3e50', shoes: '#1a1a1a', label: 'Dev' },
+            { skin: '#e8b88a', hair: '#c0392b', shirt: '#27ae60', pants: '#34495e', shoes: '#2c2c2c', label: 'PM' },
+            { skin: '#d4a06a', hair: '#2c3e50', shirt: '#8e44ad', pants: '#2c3e50', shoes: '#1a1a1a', label: 'Designer' },
+            { skin: '#f0d0a0', hair: '#f39c12', shirt: '#e74c3c', pants: '#7f8c8d', shoes: '#2c2c2c', label: 'Analyst' },
+            { skin: '#c69070', hair: '#1a1a2e', shirt: '#1abc9c', pants: '#2c3e50', shoes: '#1a1a1a', label: 'Tester' },
+            { skin: '#f4c794', hair: '#7f8c8d', shirt: '#e67e22', pants: '#34495e', shoes: '#2c2c2c', label: 'Architect' },
+        ];
+
+        // Office locations (in grid units)
+        const LOCATIONS = {
+            desk1: { x: 4, y: 4, name: 'Desk' },
+            desk2: { x: 12, y: 4, name: 'Desk' },
+            desk3: { x: 20, y: 4, name: 'Desk' },
+            desk4: { x: 4, y: 10, name: 'Desk' },
+            desk5: { x: 12, y: 10, name: 'Desk' },
+            desk6: { x: 20, y: 10, name: 'Desk' },
+            whiteboard: { x: 14, y: 1, name: 'Whiteboard' },
+            coffee: { x: 26, y: 2, name: 'Coffee' },
+            meeting: { x: 26, y: 8, name: 'Meeting' },
+            printer: { x: 1, y: 8, name: 'Printer' },
+            plant1: { x: 0, y: 0, name: 'Plant' },
+            plant2: { x: 28, y: 0, name: 'Plant' },
+            entrance: { x: 14, y: 14, name: 'Door' },
+        };
+
+        const LOCATION_KEYS = ['desk1', 'desk2', 'desk3', 'desk4', 'desk5', 'desk6', 'whiteboard', 'coffee', 'meeting'];
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // STATE
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        let agents = new Map();
+        let currentPrompt = null;
+        let sessionStart = null;
+        let connected = false;
+        let officeW = 30;
+        let officeH = 16;
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // CANVAS SETUP
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight - 36;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // PIXEL ART DRAWING HELPERS
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        function drawPixel(x, y, color) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x * PIXEL, y * PIXEL, PIXEL, PIXEL);
+        }
+
+        function drawRect(x, y, w, h, color) {
+            ctx.fillStyle = color;
+            ctx.fillRect(x * PIXEL, y * PIXEL, w * PIXEL, h * PIXEL);
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // OFFICE ENVIRONMENT
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        function getOfficeOrigin() {
+            const totalW = officeW * CHAR_W * PIXEL;
+            const totalH = officeH * CHAR_H * PIXEL;
+            return {
+                x: Math.max(10, (canvas.width - totalW) / 2),
+                y: Math.max(10, (canvas.height - totalH) / 2)
+            };
+        }
+
+        function drawOffice() {
+            const o = getOfficeOrigin();
+            ctx.save();
+            ctx.translate(o.x, o.y);
+
+            const gw = officeW * CHAR_W;
+            const gh = officeH * CHAR_H;
+
+            // Floor
+            drawRect(0, 0, gw, gh, FLOOR_COLOR);
+
+            // Floor grid
+            for (let x = 0; x < gw; x += CHAR_W) {
+                for (let y = 0; y < gh; y += CHAR_H) {
+                    // subtle grid lines
+                    ctx.fillStyle = GRID_COLOR;
+                    ctx.fillRect(x * PIXEL, y * PIXEL, gw * PIXEL, 1);
+                    ctx.fillRect(x * PIXEL, y * PIXEL, 1, gh * PIXEL);
+                }
+            }
+
+            // Walls
+            drawRect(0, 0, gw, 1, WALL_COLOR);
+            drawRect(0, 0, 1, gh, WALL_COLOR);
+            drawRect(gw - 1, 0, 1, gh, WALL_COLOR);
+            drawRect(0, gh - 1, gw, 1, WALL_COLOR);
+
+            // Draw furniture
+            drawDesks();
+            drawWhiteboard();
+            drawCoffeeMachine();
+            drawMeetingTable();
+            drawPrinter();
+            drawPlants();
+            drawDoor();
+
+            ctx.restore();
+        }
+
+        function drawDesk(gx, gy) {
+            const bx = gx * CHAR_W;
+            const by = gy * CHAR_H;
+            // Desk surface
+            drawRect(bx + 1, by + 6, 10, 6, '#5c4a3a');
+            drawRect(bx + 2, by + 7, 8, 4, '#6b5a4a');
+            // Monitor
+            drawRect(bx + 4, by + 3, 5, 4, '#333355');
+            drawRect(bx + 5, by + 4, 3, 2, '#5577cc');
+            // Monitor stand
+            drawRect(bx + 5, by + 7, 3, 1, '#444444');
+            // Keyboard
+            drawRect(bx + 3, by + 9, 6, 1, '#555555');
+        }
+
+        function drawDesks() {
+            ['desk1', 'desk2', 'desk3', 'desk4', 'desk5', 'desk6'].forEach(k => {
+                const loc = LOCATIONS[k];
+                drawDesk(loc.x, loc.y);
+            });
+        }
+
+        function drawWhiteboard() {
+            const loc = LOCATIONS.whiteboard;
+            const bx = loc.x * CHAR_W;
+            const by = loc.y * CHAR_H;
+            // Board frame
+            drawRect(bx, by, 12, 8, '#555566');
+            drawRect(bx + 1, by + 1, 10, 6, '#e8e8e8');
+            // Some writing
+            drawRect(bx + 2, by + 2, 4, 1, '#3366aa');
+            drawRect(bx + 2, by + 4, 6, 1, '#cc4444');
+            drawRect(bx + 3, by + 5, 3, 1, '#33aa55');
+        }
+
+        function drawCoffeeMachine() {
+            const loc = LOCATIONS.coffee;
+            const bx = loc.x * CHAR_W;
+            const by = loc.y * CHAR_H;
+            // Counter
+            drawRect(bx, by + 4, 8, 5, '#5c4a3a');
+            // Machine body
+            drawRect(bx + 2, by + 1, 4, 4, '#444444');
+            drawRect(bx + 3, by + 2, 2, 2, '#886644');
+            // Cup
+            drawRect(bx + 5, by + 3, 2, 2, '#dddddd');
+        }
+
+        function drawMeetingTable() {
+            const loc = LOCATIONS.meeting;
+            const bx = loc.x * CHAR_W;
+            const by = loc.y * CHAR_H;
+            // Large table
+            drawRect(bx, by + 2, 10, 7, '#5c4a3a');
+            drawRect(bx + 1, by + 3, 8, 5, '#6b5a4a');
+            // Chairs (via small squares)
+            drawRect(bx - 1, by + 4, 2, 2, '#444466');
+            drawRect(bx + 9, by + 4, 2, 2, '#444466');
+            drawRect(bx + 3, by + 1, 2, 2, '#444466');
+            drawRect(bx + 6, by + 1, 2, 2, '#444466');
+        }
+
+        function drawPrinter() {
+            const loc = LOCATIONS.printer;
+            const bx = loc.x * CHAR_W;
+            const by = loc.y * CHAR_H;
+            drawRect(bx + 1, by + 3, 6, 4, '#555555');
+            drawRect(bx + 2, by + 4, 4, 2, '#777777');
+            // Paper
+            drawRect(bx + 3, by + 2, 2, 2, '#eeeeee');
+        }
+
+        function drawPlant(gx, gy) {
+            const bx = gx * CHAR_W;
+            const by = gy * CHAR_H;
+            // Pot
+            drawRect(bx + 3, by + 10, 5, 4, '#8b5e3c');
+            drawRect(bx + 4, by + 11, 3, 2, '#a0704a');
+            // Leaves
+            drawRect(bx + 4, by + 6, 3, 4, '#2d8a4e');
+            drawRect(bx + 3, by + 7, 5, 2, '#3ca55e');
+            drawRect(bx + 2, by + 8, 2, 2, '#2d8a4e');
+            drawRect(bx + 7, by + 8, 2, 2, '#2d8a4e');
+        }
+
+        function drawPlants() {
+            drawPlant(LOCATIONS.plant1.x, LOCATIONS.plant1.y);
+            drawPlant(LOCATIONS.plant2.x, LOCATIONS.plant2.y);
+        }
+
+        function drawDoor() {
+            const loc = LOCATIONS.entrance;
+            const bx = loc.x * CHAR_W;
+            const by = loc.y * CHAR_H;
+            drawRect(bx + 2, by, 8, 1, FLOOR_COLOR); // gap in wall
+            drawRect(bx + 1, by - 1, 1, 3, '#8b5e3c');
+            drawRect(bx + 10, by - 1, 1, 3, '#8b5e3c');
+            drawRect(bx + 1, by - 2, 10, 1, '#8b5e3c');
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // PIXEL ART CHARACTER
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        function drawCharacter(px, py, palette, frame, direction, isWalking) {
+            const bobY = isWalking ? Math.sin(frame * 0.3) * 1.5 : Math.sin(frame * 0.05) * 0.5;
+            const legAnim = isWalking ? Math.sin(frame * 0.4) * 2 : 0;
+
+            const cx = Math.round(px);
+            const cy = Math.round(py + bobY);
+
+            // Shadow
+            ctx.fillStyle = 'rgba(0,0,0,0.2)';
+            ctx.beginPath();
+            ctx.ellipse(cx * PIXEL + 6 * PIXEL, (cy + 18) * PIXEL, 4 * PIXEL, 1.5 * PIXEL, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // ----- BODY -----
+            // Shoes
+            drawRect(cx + 3 + Math.round(legAnim * 0.3), cy + 16, 2, 2, palette.shoes);
+            drawRect(cx + 7 - Math.round(legAnim * 0.3), cy + 16, 2, 2, palette.shoes);
+
+            // Pants / Legs
+            drawRect(cx + 3 + Math.round(legAnim * 0.2), cy + 13, 2, 3, palette.pants);
+            drawRect(cx + 7 - Math.round(legAnim * 0.2), cy + 13, 2, 3, palette.pants);
+
+            // Torso (shirt)
+            drawRect(cx + 3, cy + 8, 6, 5, palette.shirt);
+            drawRect(cx + 2, cy + 9, 1, 3, palette.shirt); // left arm
+            drawRect(cx + 9, cy + 9, 1, 3, palette.shirt); // right arm
+
+            // Hands
+            drawRect(cx + 2, cy + 12, 1, 1, palette.skin);
+            drawRect(cx + 9, cy + 12, 1, 1, palette.skin);
+
+            // ----- HEAD -----
+            // Neck
+            drawRect(cx + 5, cy + 7, 2, 2, palette.skin);
+
+            // Head
+            drawRect(cx + 3, cy + 2, 6, 5, palette.skin);
+
+            // Hair
+            drawRect(cx + 3, cy + 1, 6, 2, palette.hair);
+            if (direction < 0) {
+                drawRect(cx + 2, cy + 2, 1, 3, palette.hair); // side hair
+            } else {
+                drawRect(cx + 9, cy + 2, 1, 3, palette.hair);
+            }
+
+            // Eyes
+            const eyeX = direction < 0 ? 0 : 1;
+            drawRect(cx + 4 + eyeX, cy + 4, 1, 1, '#1a1a2e');
+            drawRect(cx + 7 + eyeX, cy + 4, 1, 1, '#1a1a2e');
+
+            // Mouth
+            drawRect(cx + 5, cy + 6, 2, 1, '#cc8866');
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // COMIC BUBBLES
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        function drawThoughtBubble(px, py, text) {
+            const o = getOfficeOrigin();
+            const sx = o.x + px * PIXEL;
+            const sy = o.y + py * PIXEL - 10;
+
+            ctx.save();
+
+            // Thought dots
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(sx + 15, sy + 4, 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(sx + 10, sy - 4, 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Bubble
+            const lines = wrapText(text, 18);
+            const bw = Math.min(160, Math.max(80, lines.reduce((m, l) => Math.max(m, l.length * 7), 0) + 20));
+            const bh = lines.length * 14 + 14;
+
+            const bx = sx - bw / 2 + 18;
+            const by = sy - bh - 12;
+
+            // Bubble background
+            ctx.fillStyle = '#ffffff';
+            roundRect(ctx, bx, by, bw, bh, 8);
+            ctx.fill();
+
+            ctx.strokeStyle = '#333355';
+            ctx.lineWidth = 2;
+            roundRect(ctx, bx, by, bw, bh, 8);
+            ctx.stroke();
+
+            // "💭" icon
+            ctx.font = '10px "Courier New", monospace';
+            ctx.fillStyle = '#6666aa';
+            ctx.fillText('💭', bx + 4, by + 13);
+
+            // Text
+            ctx.font = '10px "Courier New", monospace';
+            ctx.fillStyle = '#2a2a3e';
+            lines.forEach((line, i) => {
+                ctx.fillText(line, bx + 8, by + 14 + i * 14);
+            });
+
+            ctx.restore();
+        }
+
+        function drawSpeechBubble(px, py, text, targetName) {
+            const o = getOfficeOrigin();
+            const sx = o.x + px * PIXEL;
+            const sy = o.y + py * PIXEL - 10;
+
+            ctx.save();
+
+            const lines = wrapText(text, 20);
+            const headerLine = targetName ? `→ ${targetName}` : '';
+            const bw = Math.min(180, Math.max(90, lines.reduce((m, l) => Math.max(m, l.length * 7), 0) + 24));
+            const bh = lines.length * 14 + (headerLine ? 28 : 14);
+
+            const bx = sx - bw / 2 + 18;
+            const by = sy - bh - 18;
+
+            // Bubble background
+            ctx.fillStyle = '#eef0ff';
+            roundRect(ctx, bx, by, bw, bh, 8);
+            ctx.fill();
+
+            ctx.strokeStyle = '#4466aa';
+            ctx.lineWidth = 2;
+            roundRect(ctx, bx, by, bw, bh, 8);
+            ctx.stroke();
+
+            // Pointer triangle
+            ctx.fillStyle = '#eef0ff';
+            ctx.beginPath();
+            ctx.moveTo(sx + 10, by + bh);
+            ctx.lineTo(sx + 18, by + bh + 10);
+            ctx.lineTo(sx + 22, by + bh);
+            ctx.fill();
+            ctx.strokeStyle = '#4466aa';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(sx + 10, by + bh);
+            ctx.lineTo(sx + 18, by + bh + 10);
+            ctx.lineTo(sx + 22, by + bh);
+            ctx.stroke();
+            // Cover the line between triangle and bubble
+            ctx.fillStyle = '#eef0ff';
+            ctx.fillRect(sx + 11, by + bh - 1, 10, 3);
+
+            // Header
+            let textY = by + 14;
+            if (headerLine) {
+                ctx.font = 'bold 9px "Courier New", monospace';
+                ctx.fillStyle = '#4466aa';
+                ctx.fillText(headerLine, bx + 8, textY);
+                textY += 14;
+            }
+
+            // Text
+            ctx.font = '10px "Courier New", monospace';
+            ctx.fillStyle = '#2a2a3e';
+            lines.forEach((line, i) => {
+                ctx.fillText(line, bx + 8, textY + i * 14);
+            });
+
+            ctx.restore();
+        }
+
+        function roundRect(ctx, x, y, w, h, r) {
+            ctx.beginPath();
+            ctx.moveTo(x + r, y);
+            ctx.lineTo(x + w - r, y);
+            ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+            ctx.lineTo(x + w, y + h - r);
+            ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+            ctx.lineTo(x + r, y + h);
+            ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+            ctx.lineTo(x, y + r);
+            ctx.quadraticCurveTo(x, y, x + r, y);
+            ctx.closePath();
+        }
+
+        function wrapText(text, maxChars) {
+            if (!text) return ['...'];
+            const words = text.split(' ');
+            const lines = [];
+            let current = '';
+            for (const word of words) {
+                if ((current + ' ' + word).trim().length > maxChars) {
+                    if (current) lines.push(current);
+                    current = word;
+                } else {
+                    current = (current + ' ' + word).trim();
+                }
+            }
+            if (current) lines.push(current);
+            return lines.length ? lines.slice(0, 4) : ['...'];
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // AGENT ENTITY
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        class AgentEntity {
+            constructor(data, index) {
+                this.id = data.id;
+                this.name = data.name;
+                this.role = data.role;
+                this.action = data.action || 'idle';
+                this.message = data.message || null;
+                this.target = data.target || null;
+                this.palette = CHARACTER_PALETTES[index % CHARACTER_PALETTES.length];
+                this.frame = Math.random() * 100;
+
+                // Position (pixel coords within office)
+                const homeLoc = LOCATION_KEYS[index % LOCATION_KEYS.length];
+                const loc = LOCATIONS[homeLoc];
+                this.homeLocation = homeLoc;
+                this.x = loc.x * CHAR_W;
+                this.y = loc.y * CHAR_H;
+                this.targetX = this.x;
+                this.targetY = this.y;
+                this.direction = 1;
+                this.isWalking = false;
+
+                // Spawn animation
+                this.spawnAlpha = 0;
+                this.spawnScale = 0.3;
+                this.alive = true;
+                this.removing = false;
+
+                // Bubble timing
+                this.bubbleTimer = 0;
+                this.bubbleDuration = 200; // frames
+
+                // Movement AI
+                this.moveTimer = Math.random() * 120 + 60;
+                this.idleTimer = 0;
+            }
+
+            update(data) {
+                if (data.name) this.name = data.name;
+                if (data.role) this.role = data.role;
+                if (data.action) this.action = data.action;
+                if (data.message !== undefined) {
+                    this.message = data.message;
+                    this.bubbleTimer = this.bubbleDuration;
+                }
+                if (data.target !== undefined) this.target = data.target;
+
+                // Move to a relevant location based on action
+                if (data.action === 'thinking') {
+                    this.moveTo(this.homeLocation);
+                } else if (data.action === 'talking') {
+                    this.moveTo('meeting');
+                } else if (data.action === 'coding') {
+                    this.moveTo(this.homeLocation);
+                } else if (data.action === 'reviewing') {
+                    this.moveTo('whiteboard');
+                } else if (data.action === 'break') {
+                    this.moveTo('coffee');
+                }
+            }
+
+            moveTo(locationKey) {
+                const loc = LOCATIONS[locationKey];
+                if (!loc) return;
+                // Add slight randomness so characters don't stack exactly
+                this.targetX = loc.x * CHAR_W + (Math.random() - 0.5) * 8;
+                this.targetY = loc.y * CHAR_H + (Math.random() - 0.5) * 4;
+            }
+
+            tick() {
+                this.frame++;
+
+                // Spawn animation
+                if (this.spawnAlpha < 1) {
+                    this.spawnAlpha = Math.min(1, this.spawnAlpha + 0.03);
+                    this.spawnScale = Math.min(1, this.spawnScale + 0.05);
+                }
+
+                // Removal fade
+                if (this.removing) {
+                    this.spawnAlpha -= 0.04;
+                    if (this.spawnAlpha <= 0) {
+                        this.alive = false;
+                    }
+                    return;
+                }
+
+                // Movement
+                const dx = this.targetX - this.x;
+                const dy = this.targetY - this.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist > 1.5) {
+                    const speed = 0.6;
+                    this.x += (dx / dist) * speed;
+                    this.y += (dy / dist) * speed;
+                    this.isWalking = true;
+                    this.direction = dx > 0 ? 1 : -1;
+                } else {
+                    this.isWalking = false;
+                    this.idleTimer++;
+
+                    // Random wandering when idle, every so often
+                    this.moveTimer--;
+                    if (this.moveTimer <= 0) {
+                        this.moveTimer = Math.random() * 300 + 100;
+                        // Pick a random location
+                        const rndLoc = LOCATION_KEYS[Math.floor(Math.random() * LOCATION_KEYS.length)];
+                        this.moveTo(rndLoc);
+                    }
+                }
+
+                // Bubble timer countdown
+                if (this.bubbleTimer > 0) {
+                    this.bubbleTimer--;
+                }
+            }
+
+            draw() {
+                const o = getOfficeOrigin();
+                ctx.save();
+                ctx.translate(o.x, o.y);
+                ctx.globalAlpha = this.spawnAlpha;
+
+                // Character
+                drawCharacter(this.x, this.y, this.palette, this.frame, this.direction, this.isWalking);
+
+                // Name label
+                ctx.font = 'bold 9px "Courier New", monospace';
+                ctx.fillStyle = this.palette.shirt;
+                ctx.textAlign = 'center';
+                ctx.fillText(this.name, this.x * PIXEL + 6 * PIXEL, (this.y + 20) * PIXEL);
+                ctx.font = '8px "Courier New", monospace';
+                ctx.fillStyle = '#8888aa';
+                ctx.fillText(this.palette.label, this.x * PIXEL + 6 * PIXEL, (this.y + 23) * PIXEL);
+                ctx.textAlign = 'left';
+
+                ctx.restore();
+
+                // Bubble (drawn outside the save/restore so it uses absolute coords)
+                if (this.bubbleTimer > 0 && this.message) {
+                    const alpha = this.bubbleTimer < 30 ? this.bubbleTimer / 30 : 1;
+                    ctx.save();
+                    ctx.globalAlpha = alpha * this.spawnAlpha;
+
+                    if (this.action === 'thinking') {
+                        drawThoughtBubble(this.x, this.y, this.message);
+                    } else {
+                        drawSpeechBubble(this.x, this.y, this.message, this.target);
+                    }
+
+                    ctx.restore();
+                }
+            }
+
+            remove() {
+                this.removing = true;
+            }
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // EVENT HANDLING
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        function handleMessage(msg) {
+            if (msg.type === 'connection') {
+                connected = msg.status === 'connected';
+                updateStatusBar();
+                document.getElementById('noConnection').style.display = connected ? 'none' : 'block';
+                return;
+            }
+
+            if (msg.type === 'state') {
+                handleFullState(msg.data);
+                return;
+            }
+
+            if (msg.type === 'event') {
+                handleEvent(msg.data);
+                return;
+            }
+        }
+
+        function handleFullState(state) {
+            if (!state) return;
+
+            currentPrompt = state.prompt;
+            sessionStart = state.sessionStartTime;
+
+            // Sync agents
+            const serverAgents = state.agents || [];
+            const serverIds = new Set(serverAgents.map(a => a.id));
+
+            // Remove agents not in server
+            for (const [id, entity] of agents) {
+                if (!serverIds.has(id)) {
+                    entity.remove();
+                }
+            }
+
+            // Add/update agents from server
+            serverAgents.forEach((data, i) => {
+                if (agents.has(data.id)) {
+                    agents.get(data.id).update(data);
+                } else {
+                    agents.set(data.id, new AgentEntity(data, agents.size));
+                }
+            });
+
+            updateStatusBar();
+            document.getElementById('noConnection').style.display = 'none';
+            connected = true;
+        }
+
+        function handleEvent(event) {
+            if (!event) return;
+
+            switch (event.type) {
+                case 'prompt_start':
+                    currentPrompt = event.prompt;
+                    sessionStart = event.timestamp;
+                    // Clear agents for new prompt
+                    agents.forEach(a => a.remove());
+                    break;
+
+                case 'agent_spawn':
+                    if (!agents.has(event.agent.id)) {
+                        agents.set(event.agent.id, new AgentEntity(event.agent, agents.size));
+                    }
+                    break;
+
+                case 'agent_update':
+                    if (agents.has(event.agent.id)) {
+                        agents.get(event.agent.id).update(event.agent);
+                    } else {
+                        agents.set(event.agent.id, new AgentEntity(event.agent, agents.size));
+                    }
+                    break;
+
+                case 'agent_remove':
+                    if (agents.has(event.agentId)) {
+                        agents.get(event.agentId).remove();
+                    }
+                    break;
+            }
+
+            updateStatusBar();
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // STATUS BAR
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        function updateStatusBar() {
+            const dot = document.getElementById('connDot');
+            const connText = document.getElementById('connText');
+            const promptText = document.getElementById('promptText');
+            const agentCount = document.getElementById('agentCount');
+
+            dot.className = 'status-dot' + (connected ? ' connected' : '');
+            connText.textContent = connected ? 'Connected' : 'Disconnected';
+            promptText.textContent = currentPrompt || 'Waiting for prompt...';
+
+            let count = 0;
+            agents.forEach(a => { if (a.alive && !a.removing) count++; });
+            agentCount.textContent = count;
+        }
+
+        function updateTimer() {
+            const timerEl = document.getElementById('sessionTimer');
+            if (!sessionStart) {
+                timerEl.textContent = '00:00';
+                return;
+            }
+            const elapsed = Math.floor((Date.now() - sessionStart) / 1000);
+            const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+            const secs = (elapsed % 60).toString().padStart(2, '0');
+            timerEl.textContent = `${mins}:${secs}`;
+        }
+        setInterval(updateTimer, 1000);
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // PARTICLES (spawn sparkles)
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        let particles = [];
+
+        function spawnParticles(x, y, count, color) {
+            const o = getOfficeOrigin();
+            for (let i = 0; i < count; i++) {
+                particles.push({
+                    x: o.x + x * PIXEL,
+                    y: o.y + y * PIXEL,
+                    vx: (Math.random() - 0.5) * 3,
+                    vy: (Math.random() - 0.5) * 3 - 1,
+                    life: 40 + Math.random() * 20,
+                    color: color || '#ffdd44',
+                    size: 2 + Math.random() * 3
+                });
+            }
+        }
+
+        function tickParticles() {
+            particles = particles.filter(p => {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.vy += 0.05;
+                p.life--;
+                return p.life > 0;
+            });
+        }
+
+        function drawParticles() {
+            particles.forEach(p => {
+                ctx.globalAlpha = Math.min(1, p.life / 20);
+                ctx.fillStyle = p.color;
+                ctx.fillRect(p.x, p.y, p.size, p.size);
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // MAIN LOOP
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        function gameLoop() {
+            // Clear
+            ctx.fillStyle = '#1a1a2e';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw office
+            drawOffice();
+
+            // Update & draw agents (sort by Y for proper layering)
+            const agentList = Array.from(agents.values()).filter(a => a.alive);
+            agentList.forEach(a => a.tick());
+            agentList.sort((a, b) => a.y - b.y);
+            agentList.forEach(a => a.draw());
+
+            // Remove dead agents from map
+            for (const [id, a] of agents) {
+                if (!a.alive) {
+                    agents.delete(id);
+                }
+            }
+
+            // Particles
+            tickParticles();
+            drawParticles();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // MESSAGE LISTENER
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        window.addEventListener('message', (event) => {
+            handleMessage(event.data);
+        });
+
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // STANDALONE MODE (for testing without VS Code)
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if (!vscode) {
+            // Connect directly to WebSocket if not in VS Code
+            let ws;
+            function connectWS() {
+                ws = new WebSocket('ws://localhost:3777');
+                ws.onopen = () => {
+                    connected = true;
+                    updateStatusBar();
+                    document.getElementById('noConnection').style.display = 'none';
+                };
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleMessage(data);
+                    } catch (e) {
+                        console.error('Parse error:', e);
+                    }
+                };
+                ws.onclose = () => {
+                    connected = false;
+                    updateStatusBar();
+                    document.getElementById('noConnection').style.display = 'block';
+                    setTimeout(connectWS, 3000);
+                };
+                ws.onerror = (e) => {
+                    console.error('WS error:', e);
+                };
+            }
+            connectWS();
+        }
+
+        // Start the game loop
+        gameLoop();
+    </script>
+</body>
+
+</html>

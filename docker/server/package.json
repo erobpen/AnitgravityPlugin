@@ -1,0 +1,14 @@
+{
+    "name": "agent-viz-server",
+    "version": "1.0.0",
+    "description": "Agent Visualizer WebSocket server for Antigravity plugin",
+    "main": "index.js",
+    "scripts": {
+        "start": "node index.js"
+    },
+    "dependencies": {
+        "express": "^5.1.0",
+        "ws": "^8.18.0",
+        "cors": "^2.8.5"
+    }
+}

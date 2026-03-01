@@ -1,0 +1,10 @@
+services:
+  agent-viz:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    ports:
+      - "3777:3777"
+    environment:
+      - PORT=3777
+    restart: unless-stopped
