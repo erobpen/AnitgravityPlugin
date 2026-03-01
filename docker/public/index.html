@@ -200,6 +200,17 @@
             ctx.fillRect(x * PIXEL, y * PIXEL, w * PIXEL, h * PIXEL);
         }
 
+        // Label drawing helper — renders a text label below furniture
+        function drawLabel(gx, gy, text, offsetX, offsetY) {
+            const bx = gx * CHAR_W;
+            const by = gy * CHAR_H;
+            ctx.font = 'bold 9px "Courier New", monospace';
+            ctx.fillStyle = '#6a6a8e';
+            ctx.textAlign = 'center';
+            ctx.fillText(text, (bx + (offsetX || 6)) * PIXEL, (by + (offsetY || 14)) * PIXEL);
+            ctx.textAlign = 'left';
+        }
+
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         // OFFICE ENVIRONMENT
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -267,9 +278,10 @@
         }
 
         function drawDesks() {
-            ['desk1', 'desk2', 'desk3', 'desk4', 'desk5', 'desk6'].forEach(k => {
+            ['desk1', 'desk2', 'desk3', 'desk4', 'desk5', 'desk6'].forEach((k, i) => {
                 const loc = LOCATIONS[k];
                 drawDesk(loc.x, loc.y);
+                drawLabel(loc.x, loc.y, `Desk ${i + 1}`, 6, 15);
             });
         }
 
@@ -284,6 +296,7 @@
             drawRect(bx + 2, by + 2, 4, 1, '#3366aa');
             drawRect(bx + 2, by + 4, 6, 1, '#cc4444');
             drawRect(bx + 3, by + 5, 3, 1, '#33aa55');
+            drawLabel(loc.x, loc.y, '📋 Whiteboard', 6, 10);
         }
 
         function drawCoffeeMachine() {
@@ -297,6 +310,7 @@
             drawRect(bx + 3, by + 2, 2, 2, '#886644');
             // Cup
             drawRect(bx + 5, by + 3, 2, 2, '#dddddd');
+            drawLabel(loc.x, loc.y, '☕ Break Room', 4, 12);
         }
 
         function drawMeetingTable() {
@@ -311,6 +325,7 @@
             drawRect(bx + 9, by + 4, 2, 2, '#444466');
             drawRect(bx + 3, by + 1, 2, 2, '#444466');
             drawRect(bx + 6, by + 1, 2, 2, '#444466');
+            drawLabel(loc.x, loc.y, '🗣️ Meeting', 5, 12);
         }
 
         function drawPrinter() {
@@ -321,6 +336,7 @@
             drawRect(bx + 2, by + 4, 4, 2, '#777777');
             // Paper
             drawRect(bx + 3, by + 2, 2, 2, '#eeeeee');
+            drawLabel(loc.x, loc.y, '🖨️ Printer', 4, 10);
         }
 
         function drawPlant(gx, gy) {
@@ -349,6 +365,7 @@
             drawRect(bx + 1, by - 1, 1, 3, '#8b5e3c');
             drawRect(bx + 10, by - 1, 1, 3, '#8b5e3c');
             drawRect(bx + 1, by - 2, 10, 1, '#8b5e3c');
+            drawLabel(loc.x, loc.y, '🚪 Entrance', 6, 4);
         }
 
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
