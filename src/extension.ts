@@ -2,219 +2,319 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as http from 'http';
+import * as os from 'os';
 
 const PIXEL_ART_SERVER = 'http://localhost:3777';
+const BRAIN_DIR = path.join(os.homedir(), '.gemini', 'antigravity', 'brain');
 
 let currentPanel: vscode.WebviewPanel | undefined;
 let wsConnection: any;
 
-// Debounce timers for activity detection
-let editDebounce: NodeJS.Timeout | undefined;
-let terminalDebounce: NodeJS.Timeout | undefined;
-let diagnosticDebounce: NodeJS.Timeout | undefined;
-
-// Track active agents so we can clean up
-const activeAgents = new Set<string>();
+// Active agent tracking with auto-expire
+const agentTimers = new Map<string, NodeJS.Timeout>();
+const AGENT_LIFETIME = 12000; // agents stay visible 12s after last update
 
 // ──────────────────────────────────────────────
-// HTTP helper to post events to Docker API
+// HTTP helper — fire-and-forget to Docker API
 // ──────────────────────────────────────────────
-async function postAgentEvent(endpoint: string, data: any): Promise<void> {
-    return new Promise((resolve) => {
-        try {
-            const payload = JSON.stringify(data);
-            const url = new URL(endpoint, PIXEL_ART_SERVER);
-            const req = http.request(
-                {
-                    hostname: url.hostname,
-                    port: url.port,
-                    path: url.pathname,
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Content-Length': Buffer.byteLength(payload)
-                    }
-                },
-                (res) => {
-                    res.on('data', () => { });
-                    res.on('end', () => resolve());
-                }
-            );
-            req.on('error', () => resolve());
-            req.write(payload);
-            req.end();
-        } catch {
-            resolve();
-        }
-    });
+function postAgentEvent(endpoint: string, data: any): void {
+    try {
+        const payload = JSON.stringify(data);
+        const url = new URL(endpoint, PIXEL_ART_SERVER);
+        const req = http.request({
+            hostname: url.hostname, port: url.port, path: url.pathname,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+        }, (res) => { res.on('data', () => { }); res.on('end', () => { }); });
+        req.on('error', () => { }); // silently ignore if Docker is offline
+        req.write(payload);
+        req.end();
+    } catch { /* noop */ }
 }
 
-async function spawnAgent(id: string, name: string, role: string, action: string, message: string, target?: string) {
-    activeAgents.add(id);
-    await postAgentEvent('/api/agent', { id, name, role, action, message, target });
+function showAgent(id: string, name: string, role: string, action: string, message: string, target?: string) {
+    // Clear any pending removal
+    const existing = agentTimers.get(id);
+    if (existing) clearTimeout(existing);
+
+    // Post the agent event
+    postAgentEvent('/api/agent', { id, name, role, action, message, target });
+
+    // Schedule auto-removal
+    agentTimers.set(id, setTimeout(() => {
+        postAgentEvent('/api/agent', { id, remove: true });
+        agentTimers.delete(id);
+    }, AGENT_LIFETIME));
 }
 
-async function removeAgent(id: string) {
-    if (activeAgents.has(id)) {
-        activeAgents.delete(id);
-        await postAgentEvent('/api/agent', { id, remove: true });
-    }
+function removeAgent(id: string) {
+    const existing = agentTimers.get(id);
+    if (existing) clearTimeout(existing);
+    agentTimers.delete(id);
+    postAgentEvent('/api/agent', { id, remove: true });
 }
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ──────────────────────────────────────────────
-// REAL-TIME WORKSPACE ACTIVITY MONITOR
+// COMPREHENSIVE REAL-TIME MONITOR
+// No filtering — captures EVERYTHING
 // ──────────────────────────────────────────────
 function startRealtimeMonitor(context: vscode.ExtensionContext) {
 
-    // 1. FILE EDITS → "Developer" agent codes
+    // ─── 1. EVERY TEXT CHANGE (no filtering) ───
+    let editBatch = 0;
     context.subscriptions.push(
         vscode.workspace.onDidChangeTextDocument((e) => {
             if (e.contentChanges.length === 0) return;
-            const fileName = path.basename(e.document.fileName);
-            // Ignore output channels, git internals, settings
-            if (fileName.startsWith('extension-output') || e.document.uri.scheme !== 'file') return;
-
-            if (editDebounce) clearTimeout(editDebounce);
-            editDebounce = setTimeout(async () => {
+            editBatch++;
+            const batch = editBatch;
+            // Debounce to 300ms to group rapid edits
+            setTimeout(() => {
+                if (batch !== editBatch) return;
+                const fileName = path.basename(e.document.fileName);
+                const ext = path.extname(fileName).toLowerCase();
                 const lang = e.document.languageId;
-                const roleMap: Record<string, string> = {
-                    'typescript': 'Developer', 'javascript': 'Developer',
-                    'python': 'Developer', 'json': 'Analyst',
-                    'html': 'Designer', 'css': 'Designer',
-                    'markdown': 'PM', 'yaml': 'DevOps',
-                    'dockerfile': 'DevOps'
-                };
-                const role = roleMap[lang] || 'Developer';
-                await spawnAgent('dev-edit', getNameForRole(role), role, 'coding',
-                    `Editing ${fileName}`);
+                const lines = e.contentChanges.reduce((sum, c) => sum + c.text.split('\n').length, 0);
 
-                // Auto-remove after 8 seconds of inactivity
-                setTimeout(() => removeAgent('dev-edit'), 8000);
-            }, 500); // debounce 500ms
-        })
-    );
+                // Map language to role
+                let role = 'Developer';
+                let name = 'Bob';
+                if (['json', 'yaml', 'yml', 'toml'].includes(ext.replace('.', ''))) { role = 'Analyst'; name = 'Dave'; }
+                if (['html', 'css', 'scss', 'less'].includes(ext.replace('.', ''))) { role = 'Designer'; name = 'Frank'; }
+                if (['md', 'txt', 'rst'].includes(ext.replace('.', ''))) { role = 'PM'; name = 'Eve'; }
+                if (lang === 'dockerfile' || ext === '.yml' || ext === '.yaml') { role = 'DevOps'; name = 'Dave'; }
 
-    // 2. FILE SAVES → brief "reviewing" action
-    context.subscriptions.push(
-        vscode.workspace.onDidSaveTextDocument(async (doc) => {
-            const fileName = path.basename(doc.fileName);
-            if (doc.uri.scheme !== 'file') return;
-            await spawnAgent('dev-save', 'Carol', 'Tester', 'reviewing',
-                `Saved ${fileName} — checking for issues...`);
-            setTimeout(() => removeAgent('dev-save'), 5000);
-        })
-    );
-
-    // 3. TERMINAL ACTIVITY → "DevOps" agent runs commands
-    context.subscriptions.push(
-        vscode.window.onDidOpenTerminal(async (terminal) => {
-            await spawnAgent('ops-terminal', 'Dave', 'DevOps', 'coding',
-                `Terminal opened: ${terminal.name}`);
-            setTimeout(() => removeAgent('ops-terminal'), 6000);
-        })
-    );
-
-    context.subscriptions.push(
-        vscode.window.onDidChangeActiveTerminal(async (terminal) => {
-            if (!terminal) return;
-            if (terminalDebounce) clearTimeout(terminalDebounce);
-            terminalDebounce = setTimeout(async () => {
-                await spawnAgent('ops-terminal', 'Dave', 'DevOps', 'coding',
-                    `Running commands in ${terminal.name}...`);
-                setTimeout(() => removeAgent('ops-terminal'), 6000);
+                showAgent('edit-agent', name, role, 'coding',
+                    `Editing ${fileName} (+${lines} lines)`);
             }, 300);
         })
     );
 
-    // 4. DIAGNOSTICS (errors/warnings) → "Tester" reviews
+    // ─── 2. EVERY FILE SAVE ───
     context.subscriptions.push(
-        vscode.languages.onDidChangeDiagnostics(async (e) => {
-            if (diagnosticDebounce) clearTimeout(diagnosticDebounce);
-            diagnosticDebounce = setTimeout(async () => {
-                let totalErrors = 0;
-                let totalWarnings = 0;
-                for (const uri of e.uris) {
-                    const diags = vscode.languages.getDiagnostics(uri);
-                    totalErrors += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
-                    totalWarnings += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Warning).length;
-                }
-                if (totalErrors > 0) {
-                    await spawnAgent('tester-diag', 'Carol', 'Tester', 'reviewing',
-                        `Found ${totalErrors} error(s) and ${totalWarnings} warning(s)!`);
-                } else if (totalWarnings > 0) {
-                    await spawnAgent('tester-diag', 'Carol', 'Tester', 'thinking',
-                        `${totalWarnings} warning(s) — reviewing...`);
-                } else {
-                    await spawnAgent('tester-diag', 'Carol', 'Tester', 'talking',
-                        `All clear! No errors. ✅`, 'Bob');
-                }
-                setTimeout(() => removeAgent('tester-diag'), 6000);
-            }, 1000);
+        vscode.workspace.onDidSaveTextDocument((doc) => {
+            const fileName = path.basename(doc.fileName);
+            showAgent('save-agent', 'Carol', 'Tester', 'reviewing',
+                `Saved ${fileName} — verifying...`);
         })
     );
 
-    // 5. ACTIVE EDITOR CHANGE → "Architect" navigates codebase
+    // ─── 3. EVERY FILE OPEN ───
     context.subscriptions.push(
-        vscode.window.onDidChangeActiveTextEditor(async (editor) => {
-            if (!editor || editor.document.uri.scheme !== 'file') return;
+        vscode.workspace.onDidOpenTextDocument((doc) => {
+            const fileName = path.basename(doc.fileName);
+            // Show architect looking at files
+            showAgent('read-agent', 'Alice', 'Architect', 'thinking',
+                `Reading ${fileName}...`);
+        })
+    );
+
+    // ─── 4. EVERY EDITOR SWITCH ───
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor((editor) => {
+            if (!editor) return;
             const fileName = path.basename(editor.document.fileName);
-            await spawnAgent('arch-nav', 'Alice', 'Architect', 'thinking',
-                `Reviewing ${fileName}...`);
-            setTimeout(() => removeAgent('arch-nav'), 5000);
+            showAgent('nav-agent', 'Alice', 'Architect', 'thinking',
+                `Navigating to ${fileName}`);
         })
     );
 
-    // 6. FILE CREATION/DELETION → "PM" tracks progress
+    // ─── 5. EVERY SELECTION CHANGE (cursor movement) ───
+    let selBatch = 0;
     context.subscriptions.push(
-        vscode.workspace.onDidCreateFiles(async (e) => {
-            const names = e.files.map(f => path.basename(f.fsPath)).join(', ');
-            await spawnAgent('pm-files', 'Eve', 'PM', 'talking',
-                `New file(s) created: ${names}`, 'Bob');
-            setTimeout(() => removeAgent('pm-files'), 5000);
+        vscode.window.onDidChangeTextEditorSelection((e) => {
+            selBatch++;
+            const batch = selBatch;
+            setTimeout(() => {
+                if (batch !== selBatch) return;
+                const line = e.selections[0]?.active.line;
+                const fileName = path.basename(e.textEditor.document.fileName);
+                if (line !== undefined) {
+                    showAgent('cursor-agent', 'Alice', 'Architect', 'reviewing',
+                        `Inspecting ${fileName}:${line + 1}`);
+                }
+            }, 800); // debounce cursor to 800ms
         })
     );
 
+    // ─── 6. EVERY TERMINAL EVENT ───
     context.subscriptions.push(
-        vscode.workspace.onDidDeleteFiles(async (e) => {
-            const names = e.files.map(f => path.basename(f.fsPath)).join(', ');
-            await spawnAgent('pm-files', 'Eve', 'PM', 'thinking',
-                `File(s) deleted: ${names}`);
-            setTimeout(() => removeAgent('pm-files'), 5000);
+        vscode.window.onDidOpenTerminal((terminal) => {
+            showAgent('term-agent', 'Dave', 'DevOps', 'coding',
+                `Terminal opened: ${terminal.name}`);
+        })
+    );
+    context.subscriptions.push(
+        vscode.window.onDidCloseTerminal((terminal) => {
+            showAgent('term-agent', 'Dave', 'DevOps', 'thinking',
+                `Terminal closed: ${terminal.name}`);
+        })
+    );
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTerminal((terminal) => {
+            if (!terminal) return;
+            showAgent('term-agent', 'Dave', 'DevOps', 'coding',
+                `Running commands in ${terminal.name}...`);
         })
     );
 
-    console.log('[AgentViz] Real-time workspace monitor started');
-}
+    // ─── 7. EVERY DIAGNOSTIC CHANGE (errors, warnings, info) ───
+    context.subscriptions.push(
+        vscode.languages.onDidChangeDiagnostics((e) => {
+            let errors = 0, warnings = 0, infos = 0;
+            for (const uri of e.uris) {
+                const diags = vscode.languages.getDiagnostics(uri);
+                errors += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
+                warnings += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Warning).length;
+                infos += diags.filter(d => d.severity === vscode.DiagnosticSeverity.Information).length;
+            }
+            if (errors > 0) {
+                showAgent('diag-agent', 'Carol', 'Tester', 'reviewing',
+                    `⚠️ ${errors} error(s), ${warnings} warning(s)!`);
+            } else if (warnings > 0) {
+                showAgent('diag-agent', 'Carol', 'Tester', 'thinking',
+                    `${warnings} warning(s) detected...`);
+            } else {
+                showAgent('diag-agent', 'Carol', 'Tester', 'talking',
+                    `All clear! No issues. ✅`, 'Bob');
+            }
+        })
+    );
 
-function getNameForRole(role: string): string {
-    const names: Record<string, string> = {
-        'Developer': 'Bob', 'Architect': 'Alice', 'Tester': 'Carol',
-        'PM': 'Eve', 'Designer': 'Frank', 'Analyst': 'Dave', 'DevOps': 'Dave'
-    };
-    return names[role] || 'Bob';
+    // ─── 8. EVERY FILE CREATE / DELETE / RENAME ───
+    context.subscriptions.push(
+        vscode.workspace.onDidCreateFiles((e) => {
+            const names = e.files.map(f => path.basename(f.fsPath)).join(', ');
+            showAgent('fs-agent', 'Eve', 'PM', 'talking',
+                `New: ${names}`, 'Bob');
+        })
+    );
+    context.subscriptions.push(
+        vscode.workspace.onDidDeleteFiles((e) => {
+            const names = e.files.map(f => path.basename(f.fsPath)).join(', ');
+            showAgent('fs-agent', 'Eve', 'PM', 'thinking',
+                `Deleted: ${names}`);
+        })
+    );
+    context.subscriptions.push(
+        vscode.workspace.onDidRenameFiles((e) => {
+            const renames = e.files.map(f =>
+                `${path.basename(f.oldUri.fsPath)} → ${path.basename(f.newUri.fsPath)}`).join(', ');
+            showAgent('fs-agent', 'Eve', 'PM', 'talking',
+                `Renamed: ${renames}`, 'Alice');
+        })
+    );
+
+    // ─── 9. WORKSPACE FOLDER CHANGES ───
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders((e) => {
+            if (e.added.length > 0) {
+                showAgent('ws-agent', 'Eve', 'PM', 'talking',
+                    `Project opened: ${e.added.map(f => f.name).join(', ')}`, 'Alice');
+            }
+            if (e.removed.length > 0) {
+                showAgent('ws-agent', 'Eve', 'PM', 'thinking',
+                    `Project closed: ${e.removed.map(f => f.name).join(', ')}`);
+            }
+        })
+    );
+
+    // ─── 10. CONFIGURATION CHANGES ───
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeConfiguration(() => {
+            showAgent('config-agent', 'Dave', 'DevOps', 'coding',
+                `Settings changed`);
+        })
+    );
+
+    // ─── 11. BRAIN DIRECTORY WATCHER ───
+    // Watches Antigravity conversation artifacts for real-time agent activity
+    try {
+        if (fs.existsSync(BRAIN_DIR)) {
+            const brainWatcher = vscode.workspace.createFileSystemWatcher(
+                new vscode.RelativePattern(vscode.Uri.file(BRAIN_DIR), '**/*')
+            );
+
+            brainWatcher.onDidCreate((uri) => {
+                const fileName = path.basename(uri.fsPath);
+                const ext = path.extname(fileName).toLowerCase();
+                if (ext === '.png' || ext === '.webp') {
+                    showAgent('brain-agent', 'Alice', 'Architect', 'reviewing',
+                        `Screenshot captured: ${fileName}`);
+                } else if (ext === '.md') {
+                    showAgent('brain-agent', 'Eve', 'PM', 'coding',
+                        `Writing artifact: ${fileName}`);
+                } else {
+                    showAgent('brain-agent', 'Alice', 'Architect', 'thinking',
+                        `Brain activity: ${fileName}`);
+                }
+            });
+
+            brainWatcher.onDidChange((uri) => {
+                const fileName = path.basename(uri.fsPath);
+                showAgent('brain-agent', 'Alice', 'Architect', 'coding',
+                    `Updating: ${fileName}`);
+            });
+
+            brainWatcher.onDidDelete((uri) => {
+                const fileName = path.basename(uri.fsPath);
+                showAgent('brain-agent', 'Alice', 'Architect', 'thinking',
+                    `Removed: ${fileName}`);
+            });
+
+            context.subscriptions.push(brainWatcher);
+        }
+    } catch { /* brain dir may not exist yet */ }
+
+    // ─── 12. TASK EXECUTION EVENTS ───
+    context.subscriptions.push(
+        vscode.tasks.onDidStartTask((e) => {
+            showAgent('task-agent', 'Dave', 'DevOps', 'coding',
+                `Task started: ${e.execution.task.name}`);
+        })
+    );
+    context.subscriptions.push(
+        vscode.tasks.onDidEndTask((e) => {
+            showAgent('task-agent', 'Dave', 'DevOps', 'talking',
+                `Task complete: ${e.execution.task.name}`, 'Carol');
+        })
+    );
+
+    // ─── 13. DEBUG SESSION EVENTS ───
+    context.subscriptions.push(
+        vscode.debug.onDidStartDebugSession((session) => {
+            showAgent('debug-agent', 'Carol', 'Tester', 'coding',
+                `Debugging: ${session.name}`);
+        })
+    );
+    context.subscriptions.push(
+        vscode.debug.onDidTerminateDebugSession((session) => {
+            showAgent('debug-agent', 'Carol', 'Tester', 'talking',
+                `Debug ended: ${session.name}`, 'Bob');
+        })
+    );
+
+    console.log('[AgentViz] Comprehensive real-time monitor started — capturing ALL events');
 }
 
 // ──────────────────────────────────────────────
 // EXTENSION ACTIVATION
 // ──────────────────────────────────────────────
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Agent Visualizer extension activated');
+    console.log('[AgentViz] Agent Visualizer activated — monitoring all activity');
 
-    // 1. Register Webview Panel Command
+    // 1. Open Panel Command
     const openCmd = vscode.commands.registerCommand('agentViz.openPanel', () => openPanel(context));
     context.subscriptions.push(openCmd);
 
-    // 2. Register Chat Participant (@visualize)
+    // 2. Chat Participant (@visualize)
     const chatHandler: vscode.ChatRequestHandler = async (
         request: vscode.ChatRequest,
-        contextInfo: vscode.ChatContext,
+        _context: vscode.ChatContext,
         stream: vscode.ChatResponseStream,
         token: vscode.CancellationToken
     ) => {
         vscode.commands.executeCommand('agentViz.openPanel');
-        await postAgentEvent('/api/prompt', { text: request.prompt });
+        postAgentEvent('/api/prompt', { text: request.prompt });
         stream.progress('Planning the task...');
 
         try {
@@ -224,25 +324,20 @@ export function activate(context: vscode.ExtensionContext) {
                 return { errorDetails: { message: 'Model not found' } };
             }
 
-            const prompt = `
-You are a development team orchestrator. Break the user's task into 4-6 sequential steps.
-For each step, assign one of these roles: architect, developer, tester, pm.
-Respond in valid JSON only, no markdown blocks:
-[{"role":"architect","name":"Alice","action":"thinking","message":"Planning..."}]
-Actions: thinking, talking, coding, reviewing, break.
+            const userMessage = vscode.LanguageModelChatMessage.User(
+                `You are a dev team orchestrator. Break this task into 4-6 steps. ` +
+                `Assign roles: architect, developer, tester, pm. ` +
+                `Respond JSON only: [{"role":"...","name":"...","action":"thinking|coding|reviewing|talking|break","message":"..."}]\n\n` +
+                `Task: ${request.prompt}`
+            );
 
-User Task: ${request.prompt}`;
-
-            const userMessage = vscode.LanguageModelChatMessage.User(prompt);
             const response = await model.sendRequest([userMessage], {}, token);
-
             let aiOutput = '';
             for await (const chunk of response.text) { aiOutput += chunk; }
 
-            let plan: any[] = [];
-            try {
-                plan = JSON.parse(aiOutput.replace(/```json/g, '').replace(/```/g, '').trim());
-            } catch {
+            let plan: any[];
+            try { plan = JSON.parse(aiOutput.replace(/```json/g, '').replace(/```/g, '').trim()); }
+            catch {
                 plan = [
                     { role: 'architect', name: 'Alice', action: 'thinking', message: `Analyzing: ${request.prompt}` },
                     { role: 'developer', name: 'Bob', action: 'coding', message: 'Implementing...' },
@@ -250,22 +345,20 @@ User Task: ${request.prompt}`;
                 ];
             }
 
-            stream.markdown('**Execution Plan:**\n\n');
-            for (const step of plan) {
-                stream.markdown(`- **${step.name} (${step.role})**: ${step.message}\n`);
-            }
+            stream.markdown('**Plan:**\n\n');
+            for (const s of plan) stream.markdown(`- **${s.name} (${s.role})**: ${s.message}\n`);
 
-            stream.progress('Agents working in the office...');
+            stream.progress('Agents working...');
             let i = 1;
-            for (const step of plan) {
+            for (const s of plan) {
                 if (token.isCancellationRequested) break;
-                await spawnAgent(`chat-${i}`, step.name, step.role, step.action, step.message, step.target);
-                await sleep(3000);
+                showAgent(`chat-${i}`, s.name, s.role, s.action, s.message, s.target);
+                await new Promise(r => setTimeout(r, 3000));
                 i++;
             }
-            for (let j = 1; j < i; j++) { await removeAgent(`chat-${j}`); await sleep(500); }
+            for (let j = 1; j < i; j++) { removeAgent(`chat-${j}`); await new Promise(r => setTimeout(r, 500)); }
 
-            stream.markdown('\n\n✅ Task complete!');
+            stream.markdown('\n\n✅ Done!');
             return {};
         } catch (err: any) {
             stream.markdown(`Error: ${err.message}`);
@@ -277,11 +370,12 @@ User Task: ${request.prompt}`;
     participant.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'icon.png');
     context.subscriptions.push(participant);
 
-    // 3. START REAL-TIME MONITOR — watches file edits, terminal, diagnostics, etc.
+    // 3. START THE MONITOR — captures EVERYTHING
     startRealtimeMonitor(context);
 
-    // Send initial prompt to visualizer
-    postAgentEvent('/api/prompt', { text: 'Antigravity IDE — live workspace activity' });
+    // Initial prompt
+    const wsFolder = vscode.workspace.workspaceFolders?.[0]?.name || 'Workspace';
+    postAgentEvent('/api/prompt', { text: `Antigravity — ${wsFolder}` });
 }
 
 // ──────────────────────────────────────────────
@@ -289,7 +383,6 @@ User Task: ${request.prompt}`;
 // ──────────────────────────────────────────────
 function openPanel(context: vscode.ExtensionContext) {
     if (currentPanel) { currentPanel.reveal(vscode.ViewColumn.One); return; }
-
     currentPanel = vscode.window.createWebviewPanel(
         'agentVisualizer', '🏢 Agent Office', vscode.ViewColumn.One,
         {
@@ -305,7 +398,6 @@ function openPanel(context: vscode.ExtensionContext) {
     );
     html = html.replace(/{{mediaUri}}/g, mediaUri.toString());
     currentPanel.webview.html = html;
-
     connectToServer(currentPanel);
 
     currentPanel.onDidDispose(() => {
@@ -319,7 +411,6 @@ function connectToServer(panel: vscode.WebviewPanel) {
         const WebSocket = require('ws');
         if (wsConnection) wsConnection.close();
         wsConnection = new WebSocket('ws://localhost:3777');
-
         wsConnection.on('open', () => panel.webview.postMessage({ type: 'connection', status: 'connected' }));
         wsConnection.on('message', (data: any) => {
             try { panel.webview.postMessage(JSON.parse(data.toString())); } catch { }
@@ -337,9 +428,10 @@ function connectToServer(panel: vscode.WebviewPanel) {
 }
 
 export function deactivate() {
-    // Clean up all active agents
-    for (const id of activeAgents) {
+    for (const [id, timer] of agentTimers) {
+        clearTimeout(timer);
         postAgentEvent('/api/agent', { id, remove: true });
     }
+    agentTimers.clear();
     if (wsConnection) wsConnection.close();
 }
